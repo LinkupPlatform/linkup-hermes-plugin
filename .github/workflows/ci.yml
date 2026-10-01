@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m unittest discover -s tests -v
+
+  hermes-validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Hermes Agent
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/hermes-install.sh" https://hermes-agent.nousresearch.com/install.sh
+          bash "$RUNNER_TEMP/hermes-install.sh" --non-interactive --skip-browser --skip-computer-use
+      - name: hermes plugins validate
+        run: ~/.local/bin/hermes plugins validate --install-deps .
+      - name: hermes plugins doctor
+        run: ~/.local/bin/hermes plugins doctor . --ci

@@ -1,0 +1,49 @@
+manifest_version: 2
+name: linkup
+version: 1.0.0
+description: "Linkup web search for Hermes — live cited search (fast/standard/deep), URL-to-Markdown fetch with JS rendering, async deep research, and a Linkup backend for the built-in web_search / web_extract tools."
+author: Linkup
+license: MIT
+homepage: https://github.com/LinkupPlatform/linkup-hermes-plugin
+requires_hermes: ">=0.21"
+tags: [web, search, research, scraping, citations, linkup]
+requires_env:
+  - name: LINKUP_API_KEY
+    description: "Linkup API key"
+    url: "https://app.linkup.so"
+    secret: true
+provides_tools:
+  - linkup_search
+  - linkup_fetch
+  - linkup_research
+  - linkup_research_status
+provides_hooks: []
+provides_web_providers:
+  - linkup
+config_schema:
+  search_depth:
+    type: str
+    choices: [flash, fast, standard, deep]
+    default: standard
+    label: "Default depth for linkup_search"
+    description: "Used when the model does not pick a depth."
+  web_search_depth:
+    type: str
+    choices: [flash, fast, standard, deep]
+    default: standard
+    label: "Depth for the built-in web_search tool"
+    description: "Applies when Linkup is the selected web backend."
+  fetch_render_js:
+    type: bool
+    default: true
+    label: "Render JavaScript when fetching pages"
+  research_reasoning_depth:
+    type: str
+    choices: [S, M, L, XL]
+    default: M
+    label: "Default reasoning depth for linkup_research"
+  api_key:
+    type: secret
+    env: LINKUP_API_KEY
+    label: "Linkup API key"
+    description: "Get one at https://app.linkup.so"
