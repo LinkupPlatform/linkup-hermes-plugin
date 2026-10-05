@@ -1,6 +1,6 @@
 manifest_version: 2
 name: linkup
-version: 1.0.0
+version: 1.0.1
 description: "Linkup web search for Hermes — live cited search (fast/standard/deep), URL-to-Markdown fetch with JS rendering, async deep research, and a Linkup backend for the built-in web_search / web_extract tools."
 author: Linkup
 license: MIT

@@ -1,7 +1,7 @@
 ---
 name: web-search
 description: "How to get accurate, cited web answers with linkup_search and linkup_fetch: picking depth and output_type, writing retrieval-plan queries, filters, and citation rules."
-version: 1.0.0
+version: 1.0.1
 author: Linkup
 license: MIT
 metadata:

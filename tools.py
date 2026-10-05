@@ -5,19 +5,23 @@ from __future__ import annotations
 import hashlib
 import html
 import json
+import logging
 import re
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Pattern
+from urllib.parse import unquote
 
 from . import client, settings
 from .client import LinkupError
 
-SEARCH_DEPTHS = ("flash", "fast", "standard", "deep")
+logger = logging.getLogger(__name__)
+
+SEARCH_DEPTHS = settings.SEARCH_DEPTHS
 SEARCH_OUTPUT_TYPES = ("searchResults", "sourcedAnswer", "structured")
 RESEARCH_MODES = ("answer", "investigate", "research")
-RESEARCH_DEPTHS = ("S", "M", "L", "XL")
+RESEARCH_DEPTHS = settings.RESEARCH_DEPTHS
 RESEARCH_OUTPUT_TYPES = ("sourcedAnswer", "structured")
 TERMINAL_STATUSES = ("completed", "failed")
 
@@ -51,6 +55,7 @@ def _guard(handler: Callable[[Dict[str, Any]], str]) -> Callable[..., str]:
         except ValueError as exc:
             return _err(str(exc))
         except Exception as exc:  # noqa: BLE001 — tool handlers must never raise
+            logger.exception("Linkup tool %s failed", handler.__name__)
             return _err(f"Linkup plugin error: {type(exc).__name__}: {exc}")
 
     wrapped.__name__ = handler.__name__
@@ -161,10 +166,43 @@ def linkup_search(args: Dict[str, Any]) -> str:
 
 # --- linkup_fetch --------------------------------------------------------------------------------
 
+def _secret_pattern() -> Optional[Pattern[str]]:
+    try:
+        from agent.redact import _PREFIX_RE
+    except ImportError:
+        return None
+    return _PREFIX_RE
+
+
+def _website_block(url: str) -> Optional[str]:
+    """The operator's ``website_blocklist`` verdict for *url*; fails open on policy errors like core."""
+    try:
+        from tools.website_policy import check_website_access
+    except ImportError:
+        return None
+    try:
+        block = check_website_access(url)
+    except Exception:  # noqa: BLE001
+        return None
+    return (block.get("message") or f"Blocked by website policy: {url}") if block else None
+
+
+def check_url_policy(url: str) -> None:
+    """The URL checks core ``web_extract`` applies before calling any provider."""
+    pattern = _secret_pattern()
+    if pattern is not None and any(pattern.search(candidate) for candidate in (url, unquote(url))):
+        raise ValueError("Blocked: URL contains what appears to be an API key or token. "
+                         "Secrets must not be sent in URLs.")
+    blocked = _website_block(url)
+    if blocked:
+        raise ValueError(blocked)
+
+
 def build_fetch_payload(args: Dict[str, Any]) -> Dict[str, Any]:
     url = _require_text(args, "url")
     if not re.match(r"^https?://", url, re.IGNORECASE):
         raise ValueError("url must be an absolute http(s) URL")
+    check_url_policy(url)
     render_js = args.get("render_js")
     payload: Dict[str, Any] = {
         "url": url,

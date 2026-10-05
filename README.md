@@ -39,7 +39,7 @@ hermes linkup use-as-web-backend                 # web_search + web_extract
 hermes linkup use-as-web-backend --search-only   # only web_search
 ```
 
-This is the same as `hermes config set web.backend linkup`. You can also pick **Linkup** in `hermes tools`.
+This sets `web.backend: linkup`. If `web.search_backend` or `web.extract_backend` already names another provider, those override `web.backend`, so the command switches them to `linkup` too and prints every key it changed. You can also pick **Linkup** in `hermes tools`.
 
 ## Tools
 
@@ -76,11 +76,24 @@ Settings live under `plugins.entries.linkup.settings` in `~/.hermes/config.yaml`
 | `fetch_render_js` | `true` | Render JavaScript when fetching pages |
 | `research_reasoning_depth` | `M` | Default `reasoning_depth` for `linkup_research` |
 
+An invalid value falls back to the default and logs a warning.
+
 Example:
 
 ```bash
 hermes config set plugins.entries.linkup.settings.search_depth fast
 ```
+
+**Environment variables**
+
+| Variable | Meaning |
+|---|---|
+| `LINKUP_API_KEY` | Your Linkup API key (required) |
+| `LINKUP_API_BASE_URL` | Override the API endpoint (default `https://api.linkup.so/v1`), for proxies or private deployments. Your API key is sent to this host as a bearer token, so only point it at hosts you trust. |
+
+**URL safety**
+
+`linkup_fetch` refuses URLs that look like they contain an API key or token, and it honors Hermes' `website_blocklist`, the same checks core `web_extract` applies.
 
 ## Commands
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import time
 import urllib.error
 import urllib.request
 from typing import Any, Dict, Optional
@@ -23,7 +24,11 @@ USER_AGENT = f"linkup-hermes-plugin/{__version__}"
 DEFAULT_TIMEOUT = 60
 DEEP_SEARCH_TIMEOUT = 300
 FETCH_TIMEOUT = 120
-JS_FALLBACK_MIN_CHARS = 1000
+BROKEN_RENDER_MAX_CHARS = 200
+NOSCRIPT_CHECK_MAX_CHARS = 2000
+FALLBACK_MIN_SECONDS = 10
+_NOSCRIPT_MARKERS = ("enable javascript", "javascript is required", "javascript is disabled",
+                     "requires javascript", "turn on javascript")
 
 
 class LinkupError(Exception):
@@ -111,17 +116,38 @@ def search(payload: Dict[str, Any]) -> Dict[str, Any]:
     return request("POST", "/search", payload, timeout=timeout)
 
 
-def fetch(payload: Dict[str, Any], js_fallback: bool = False) -> Dict[str, Any]:
-    """``js_fallback``: when a JS-rendered page comes back near-empty (sites whose client
-    bundle crashes in a headless browser), refetch without rendering and keep the longer one."""
-    data = request("POST", "/fetch", payload, timeout=FETCH_TIMEOUT)
-    if not (js_fallback and payload.get("renderJs")) or len(data.get("markdown") or "") >= JS_FALLBACK_MIN_CHARS:
+def looks_like_broken_render(markdown: str) -> bool:
+    """A JS render that produced next to nothing, or a "please enable JavaScript" wall."""
+    text = markdown.strip()
+    if len(text) < BROKEN_RENDER_MAX_CHARS:
+        return True
+    return len(text) < NOSCRIPT_CHECK_MAX_CHARS and any(m in text.lower() for m in _NOSCRIPT_MARKERS)
+
+
+def _remaining(deadline: Optional[float]) -> float:
+    if deadline is None:
+        return FETCH_TIMEOUT
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise LinkupError("Linkup fetch ran out of time before it could start.")
+    return min(FETCH_TIMEOUT, remaining)
+
+
+def fetch(payload: Dict[str, Any], js_fallback: bool = False, deadline: Optional[float] = None) -> Dict[str, Any]:
+    """``js_fallback``: when a JS-rendered page looks broken (sites whose client bundle crashes in a
+    headless browser), refetch without rendering and keep the longer one. ``deadline`` is a
+    ``time.monotonic()`` bound for both requests; the fallback is skipped when little time is left."""
+    data = request("POST", "/fetch", payload, timeout=_remaining(deadline))
+    markdown = data.get("markdown") or ""
+    if not (js_fallback and payload.get("renderJs")) or not looks_like_broken_render(markdown):
+        return data
+    if deadline is not None and deadline - time.monotonic() < FALLBACK_MIN_SECONDS:
         return data
     try:
-        static = request("POST", "/fetch", {**payload, "renderJs": False}, timeout=FETCH_TIMEOUT)
+        static = request("POST", "/fetch", {**payload, "renderJs": False}, timeout=_remaining(deadline))
     except LinkupError:
         return data
-    return static if len(static.get("markdown") or "") > len(data.get("markdown") or "") else data
+    return static if len(static.get("markdown") or "") > len(markdown) else data
 
 
 def start_research(payload: Dict[str, Any]) -> Dict[str, Any]:

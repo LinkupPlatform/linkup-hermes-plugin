@@ -1,7 +1,7 @@
 ---
 name: deep-research
 description: "When and how to run Linkup deep research (linkup_research + linkup_research_status): scoping the brief, picking mode and reasoning_depth, polling, and presenting the cited report."
-version: 1.0.0
+version: 1.0.1
 author: Linkup
 license: MIT
 metadata:

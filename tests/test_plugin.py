@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import contextvars
 import io
 import json
 import os
+import re
 import tempfile
+import threading
+import time
 import unittest
 import urllib.error
 from pathlib import Path
@@ -62,6 +66,11 @@ class RegistrationTests(unittest.TestCase):
 
     def test_version_matches_manifest(self):
         self.assertIn(f"version: {plugin.__version__}\n", (PLUGIN_DIR / "plugin.yaml").read_text())
+
+    def test_manifest_choices_match_settings(self):
+        manifest = (PLUGIN_DIR / "plugin.yaml").read_text()
+        self.assertEqual(manifest.count(f"choices: [{', '.join(settings.SEARCH_DEPTHS)}]"), 2)
+        self.assertEqual(manifest.count(f"choices: [{', '.join(settings.RESEARCH_DEPTHS)}]"), 1)
 
     def test_check_fn_tracks_key(self):
         with mock.patch.dict(os.environ, {"LINKUP_API_KEY": ""}):
@@ -174,9 +183,23 @@ class SearchToolTests(KeyedTestCase):
         _, payload = self.run_search({"query": "q"}, {"results": []})
         self.assertEqual(payload["depth"], "fast")
 
+    def test_invalid_depth_setting_falls_back(self):
+        settings.bind(RecordingContext({"search_depth": "ultra", "research_reasoning_depth": "XXL"}))
+        with self.assertLogs(settings.logger, "WARNING"):
+            _, payload = self.run_search({"query": "q"}, {"results": []})
+        self.assertEqual(payload["depth"], "standard")
+        self.assertEqual(tools.build_research_payload({"query": "q"})["reasoningDepth"], "M")
+
     def test_api_error_is_returned_not_raised(self):
         with mock.patch.object(client, "request", side_effect=client.LinkupError("boom")):
             self.assertEqual(json.loads(tools.linkup_search({"query": "q"})), {"error": "boom"})
+
+    def test_unexpected_error_is_logged(self):
+        with mock.patch.object(client, "request", side_effect=RuntimeError("bug")), \
+                self.assertLogs(tools.logger, "ERROR") as logs:
+            out = json.loads(tools.linkup_search({"query": "q"}))
+        self.assertIn("RuntimeError: bug", out["error"])
+        self.assertIn("linkup_search", logs.output[0])
 
 
 class FetchToolTests(KeyedTestCase):
@@ -227,6 +250,43 @@ class FetchToolTests(KeyedTestCase):
         with mock.patch.object(client, "request", return_value={"markdown": "short"}) as req:
             json.loads(tools.linkup_fetch({"url": "https://x.com", "render_js": True}))
         self.assertEqual(req.call_count, 1)
+
+    def test_short_legit_page_fetched_once(self):
+        with mock.patch.object(client, "request", return_value={"markdown": "A short changelog entry. " * 20}) as req:
+            json.loads(tools.linkup_fetch({"url": "https://x.com"}))
+        self.assertEqual(req.call_count, 1)
+
+    def test_noscript_wall_triggers_fallback(self):
+        pages = {True: {"markdown": "# App\n\nYou need to enable JavaScript to run this app. " * 5},
+                 False: {"markdown": "static content " * 300}}
+        with mock.patch.object(client, "request", side_effect=lambda m, p, payload, timeout: pages[payload["renderJs"]]) as req:
+            out = json.loads(tools.linkup_fetch({"url": "https://x.com"}))
+        self.assertEqual(req.call_count, 2)
+        self.assertTrue(out["markdown"].startswith("static content"))
+
+    def test_fallback_skipped_near_deadline(self):
+        with mock.patch.object(client, "request", return_value={"markdown": "# //Error"}) as req:
+            client.fetch({"url": "https://x.com", "renderJs": True}, js_fallback=True,
+                         deadline=client.time.monotonic() + 3)
+        self.assertEqual(req.call_count, 1)
+        self.assertLessEqual(req.call_args[1]["timeout"], 3)
+
+    def test_secret_url_refused(self):
+        secret = re.compile(r"sk-[A-Za-z0-9]{16,}")
+        with mock.patch.object(tools, "_secret_pattern", return_value=secret), \
+                mock.patch.object(client, "request") as req:
+            plain = json.loads(tools.linkup_fetch({"url": "https://x.com/?key=sk-abcdefghijklmnop1234"}))
+            encoded = json.loads(tools.linkup_fetch({"url": "https://x.com/?key=sk%2Dabcdefghijklmnop1234"}))
+        self.assertIn("API key or token", plain["error"])
+        self.assertIn("API key or token", encoded["error"])
+        req.assert_not_called()
+
+    def test_website_blocklist_honored(self):
+        with mock.patch.object(tools, "_website_block", return_value="Blocked by website policy: 'x.com'"), \
+                mock.patch.object(client, "request") as req:
+            out = json.loads(tools.linkup_fetch({"url": "https://x.com/page"}))
+        self.assertEqual(out["error"], "Blocked by website policy: 'x.com'")
+        req.assert_not_called()
 
     def test_rejects_non_http_url(self):
         self.assertIn("error", json.loads(tools.linkup_fetch({"url": "file:///etc/passwd"})))
@@ -321,6 +381,41 @@ class ProviderTests(KeyedTestCase):
         self.assertEqual(docs[0]["raw_content"], docs[0]["content"])
         self.assertEqual(docs[1]["error"], "blocked")
 
+    def test_extract_workers_inherit_caller_context(self):
+        profile = contextvars.ContextVar("profile", default="launch")
+        seen = []
+
+        def fake(method, path, payload, timeout):
+            seen.append(profile.get())
+            return {"markdown": "# Page\n\n" + "body " * 100}
+
+        def call_as_routed_profile():
+            profile.set("routed")
+            return self.provider.extract([f"https://u{i}" for i in range(7)])
+
+        with mock.patch.object(client, "request", side_effect=fake):
+            docs = contextvars.copy_context().run(call_as_routed_profile)
+        self.assertEqual(seen, ["routed"] * 7)
+        self.assertTrue(all(not d.get("error") for d in docs))
+
+    def test_extract_keeps_finished_pages_at_deadline(self):
+        release = threading.Event()
+        self.addCleanup(release.set)
+
+        def fake(method, path, payload, timeout):
+            if "slow" in payload["url"]:
+                release.wait(10)
+            return {"markdown": "# Done\n\n" + "body " * 100}
+
+        with mock.patch.object(provider_mod, "_extract_budget", return_value=0.5), \
+                mock.patch.object(client, "request", side_effect=fake):
+            started = time.monotonic()
+            docs = self.provider.extract(["https://fast", "https://slow"])
+            elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 2)
+        self.assertEqual(docs[0]["title"], "Done")
+        self.assertIn("did not finish", docs[1]["error"])
+
 
 class CommandTests(KeyedTestCase):
     def test_slash_status_and_balance(self):
@@ -341,6 +436,17 @@ class CommandTests(KeyedTestCase):
     def test_status_without_key(self):
         with mock.patch.dict(os.environ, {"LINKUP_API_KEY": ""}):
             self.assertIn("NOT SET", commands.slash_command("status"))
+
+    def test_backend_keys(self):
+        keys = commands.backend_keys_to_set
+        unset = {"backend": None, "search_backend": None, "extract_backend": None}
+        self.assertEqual(keys(False, False, unset), ["web.backend"])
+        self.assertEqual(keys(False, False, {**unset, "search_backend": "exa", "extract_backend": "linkup"}),
+                         ["web.backend", "web.search_backend"])
+        self.assertEqual(keys(False, False, {**unset, "search_backend": "exa", "extract_backend": "tavily"}),
+                         ["web.backend", "web.search_backend", "web.extract_backend"])
+        self.assertEqual(keys(True, False, {**unset, "extract_backend": "exa"}), ["web.search_backend"])
+        self.assertEqual(keys(False, True, unset), ["web.extract_backend"])
 
 
 if __name__ == "__main__":
