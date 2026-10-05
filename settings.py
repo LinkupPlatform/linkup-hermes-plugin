@@ -2,13 +2,25 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
+
+SEARCH_DEPTHS = ("flash", "fast", "standard", "deep")
+RESEARCH_DEPTHS = ("S", "M", "L", "XL")
 
 DEFAULTS = {
     "search_depth": "standard",
     "web_search_depth": "standard",
     "fetch_render_js": True,
     "research_reasoning_depth": "M",
+}
+
+CHOICES = {
+    "search_depth": SEARCH_DEPTHS,
+    "web_search_depth": SEARCH_DEPTHS,
+    "research_reasoning_depth": RESEARCH_DEPTHS,
 }
 
 _ctx: Optional[Any] = None
@@ -28,6 +40,10 @@ def get(key: str) -> Any:
     except Exception:  # noqa: BLE001 — a bad config must not break a tool call
         return default
     if value is None or (isinstance(default, bool) and not isinstance(value, bool)):
+        return default
+    if key in CHOICES and value not in CHOICES[key]:
+        logger.warning("Linkup setting %s=%r is not one of %s; using %r",
+                       key, value, ", ".join(CHOICES[key]), default)
         return default
     if isinstance(default, int) and not isinstance(default, bool):
         try:

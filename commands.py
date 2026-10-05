@@ -97,6 +97,20 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     subparser.set_defaults(func=cli_command)
 
 
+def backend_keys_to_set(search_only: bool, extract_only: bool, current: Dict[str, Optional[str]]) -> List[str]:
+    """Config keys that make Linkup the active backend. The per-tool keys override ``web.backend``,
+    so with no flag any of them naming another provider is switched too."""
+    if search_only:
+        return ["web.search_backend"]
+    if extract_only:
+        return ["web.extract_backend"]
+    keys = ["web.backend"]
+    for name in ("search_backend", "extract_backend"):
+        if current.get(name) and current[name] != "linkup":
+            keys.append(f"web.{name}")
+    return keys
+
+
 def _set_config(key: str, value: str) -> None:
     from hermes_cli.config import set_config_value
     set_config_value(key, value)
@@ -127,10 +141,9 @@ def cli_command(args: argparse.Namespace) -> int:
             print(f"{i}. {r.get('name') or r.get('url')}\n   {r.get('url')}")
         return 0
     if sub == "use-as-web-backend":
-        keys = (["web.search_backend"] if args.search_only else
-                ["web.extract_backend"] if args.extract_only else ["web.backend"])
-        for key in keys:
+        for key in backend_keys_to_set(args.search_only, args.extract_only, _web_backends()):
             _set_config(key, "linkup")
+            print(f"Set {key} = linkup")
         if not client.has_api_key():
             print(f"Note: {client.KEY_ENV} is not set yet — run `hermes config set {client.KEY_ENV} <key>`.")
         return 0

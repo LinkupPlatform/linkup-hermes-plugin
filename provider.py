@@ -6,11 +6,13 @@ Select it with ``hermes config set web.backend linkup`` (or ``web.search_backend
 
 from __future__ import annotations
 
+import contextvars
 import html
 import logging
 import re
-from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict, List
+import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout, as_completed
+from typing import Any, Dict, List, Optional
 
 from agent.web_search_provider import WebSearchProvider
 
@@ -20,6 +22,22 @@ from .client import LinkupError
 logger = logging.getLogger(__name__)
 
 EXTRACT_WORKERS = 5
+DEFAULT_EXTRACT_TIMEOUT = 120.0
+EXTRACT_DEADLINE_MARGIN = 5.0
+
+
+def _extract_budget() -> Optional[float]:
+    """Seconds this batch may take: Hermes' ``web.extract_timeout`` minus a margin, so finished pages
+    come back before core's timeout discards the whole batch. ``None`` when the cap is disabled."""
+    try:
+        from hermes_cli.config import load_config_readonly
+        web = (load_config_readonly() or {}).get("web") or {}
+        timeout = float(web.get("extract_timeout", DEFAULT_EXTRACT_TIMEOUT))
+    except Exception:  # noqa: BLE001
+        timeout = DEFAULT_EXTRACT_TIMEOUT
+    if timeout <= 0:
+        return None
+    return max(1.0, timeout - EXTRACT_DEADLINE_MARGIN)
 
 _HEADING_RE = re.compile(r"^\s{0,3}#{1,2}\s+(.+?)\s*#*\s*$", re.MULTILINE)
 
@@ -48,8 +66,6 @@ class LinkupWebSearchProvider(WebSearchProvider):
 
     def search(self, query: str, limit: int = 5) -> Dict[str, Any]:
         depth = settings.get("web_search_depth")
-        if depth not in ("flash", "fast", "standard", "deep"):
-            depth = "standard"
         payload = {
             "q": query,
             "depth": depth,
@@ -71,9 +87,10 @@ class LinkupWebSearchProvider(WebSearchProvider):
             for i, r in enumerate(rows)
         ]}}
 
-    def _extract_one(self, url: str) -> Dict[str, Any]:
+    def _extract_one(self, url: str, deadline: Optional[float] = None) -> Dict[str, Any]:
         try:
-            data = client.fetch({"url": url, "renderJs": bool(settings.get("fetch_render_js"))}, js_fallback=True)
+            data = client.fetch({"url": url, "renderJs": bool(settings.get("fetch_render_js"))},
+                                js_fallback=True, deadline=deadline)
         except LinkupError as exc:
             return {"url": url, "title": "", "content": "", "error": str(exc)}
         except Exception as exc:  # noqa: BLE001
@@ -90,8 +107,26 @@ class LinkupWebSearchProvider(WebSearchProvider):
         if not urls:
             return []
         logger.info("Linkup extract: %d URL(s)", len(urls))
-        with ThreadPoolExecutor(max_workers=min(EXTRACT_WORKERS, len(urls))) as pool:
-            return list(pool.map(self._extract_one, urls))
+        budget = _extract_budget()
+        deadline = time.monotonic() + budget if budget is not None else None
+        results: Dict[int, Dict[str, Any]] = {}
+        pool = ThreadPoolExecutor(max_workers=min(EXTRACT_WORKERS, len(urls)))
+        try:
+            # Each worker runs in a copy of the caller's context: on a multiplexed gateway the
+            # active profile's secret scope and home live in ContextVars.
+            futures = {pool.submit(contextvars.copy_context().run, self._extract_one, url, deadline): i
+                       for i, url in enumerate(urls)}
+            try:
+                for future in as_completed(futures, timeout=budget):
+                    results[futures[future]] = future.result()
+            except FuturesTimeout:
+                logger.warning("Linkup extract: %d of %d URL(s) unfinished after %gs",
+                               len(urls) - len(results), len(urls), budget)
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
+        timed_out = f"Linkup fetch did not finish within {budget or 0:g}s"
+        return [results.get(i) or {"url": url, "title": "", "content": "", "error": timed_out}
+                for i, url in enumerate(urls)]
 
     def get_setup_schema(self) -> Dict[str, Any]:
         return {
